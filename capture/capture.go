@@ -155,8 +155,9 @@ func Capture(config *CaptureConfig, packetSource *gopacket.PacketSource) {
 			if conversation.RequestFIN && conversation.ResponseFIN {
 				if err := conversation.Parse(); err == nil {
 					if r != nil && r.Match([]byte(conversation.HTTPRequest.URL.Path)) {
-						fmt.Println(conversation.HTTPRequest)
-						fmt.Println(conversation.HTTPResponse)
+                        fmt.Println("---")
+						fmt.Println(conversation.RequestBuffer.String())
+						fmt.Println(conversation.ResponseBuffer.String())
 					}
 
 					delete(conversations, flowKey)
