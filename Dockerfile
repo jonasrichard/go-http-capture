@@ -10,7 +10,7 @@ RUN wget http://www.tcpdump.org/release/libpcap-1.5.3.tar.gz && \
     tar xvf libpcap-1.5.3.tar.gz && \
     cd libpcap-1.5.3 && \
     ./configure --with-pcap=linux && \
-    make
+    make install
 
 WORKDIR /src
 

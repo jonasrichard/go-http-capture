@@ -6,28 +6,40 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"time"
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 )
 
-type Conversation struct {
-	StartTime time.Time
-	// RequestID is IP << 16 + Port
-	RequestID      uint32
-	ResponseID     uint32
-	RequestBuffer  *bytes.Buffer
-	ResponseBuffer *bytes.Buffer
-	HTTPRequest    *http.Request
-	HTTPResponse   *http.Response
-	RequestFIN     bool
-	ResponseFIN    bool
+type CaptureConfig struct {
+	Interface   string
+	CaptureFile string
+	Pattern     string
 }
 
-// var flows map[uint32]*gopacket.Flow = make(map[uint32]*gopacket.Flow)
-// var streams map[uint32]*bytes.Buffer = make(map[uint32]*bytes.Buffer)
-// var requests map[uint32]*http.Request = make(map[uint32]*http.Request)
+type Conversation struct {
+	// StartTime is the timestamp of the first packet in the flow
+	StartTime time.Time
+	// RequestID is IP << 16 + port
+	RequestID uint32
+	// ResponseID is IP << 16 + port
+	ResponseID uint32
+	// RequestBuffer collects the request side of the traffic/payloads
+	RequestBuffer *bytes.Buffer
+	// ResponseBuffer collects the response side of the traffic/payloads
+	ResponseBuffer *bytes.Buffer
+	// HTTPRequest is the parsed HTTP request from the request buffer
+	HTTPRequest *http.Request
+	// HTTPResponse is the parsed HTTP response from the response buffer
+	HTTPResponse *http.Response
+	// RequestFIN is true if FIN packet arrived from request side
+	RequestFIN bool
+	// ResponseFIN is true if FIN packet arrived from response side
+	ResponseFIN bool
+}
+
 var conversations map[uint32]*Conversation = make(map[uint32]*Conversation)
 
 // FlowKey packs a source and destination port to identify the flow
@@ -35,6 +47,8 @@ func FlowKey(srcPort, dstPort uint16) uint32 {
 	return uint32(srcPort)<<16 + uint32(dstPort)
 }
 
+// Reverse reverses the ports in the flowkey in order to find the other side
+// of the conversation.
 func Reverse(flowKey uint32) uint32 {
 	lo := flowKey & 0xFFFF
 	hi := flowKey >> 16
@@ -42,16 +56,8 @@ func Reverse(flowKey uint32) uint32 {
 	return lo<<16 + hi
 }
 
+// AddPayload appends the payload to the respective buffer.
 func (c *Conversation) AddPayload(flowKey uint32, payload []byte) {
-	// if this is the first, this flow key is request id
-	//if c.RequestID == 0 && c.ResponseID == 0 {
-	//    c.StartTime = time.Now()
-	//    c.RequestID = flowKey
-	//    c.ResponseID = Reverse(flowKey)
-	//    c.RequestBuffer = new(bytes.Buffer)
-	//    c.ResponseBuffer = new(bytes.Buffer)
-	//}
-
 	if flowKey == c.RequestID {
 		c.RequestBuffer.Write(payload)
 	} else {
@@ -59,6 +65,7 @@ func (c *Conversation) AddPayload(flowKey uint32, payload []byte) {
 	}
 }
 
+// HandleFIN sets the respective FIN bool flag.
 func (c *Conversation) HandleFIN(flowKey uint32) {
 	if flowKey == c.RequestID {
 		c.RequestFIN = true
@@ -67,8 +74,13 @@ func (c *Conversation) HandleFIN(flowKey uint32) {
 	}
 }
 
+// Parse parses the request and response and stores them in this struct.
 func (c *Conversation) Parse() error {
 	var err error
+
+	if c.RequestBuffer.Len() == 0 {
+		return errors.New("empty request")
+	}
 
 	c.HTTPRequest, err = http.ReadRequest(bufio.NewReader(c.RequestBuffer))
 	if err != nil {
@@ -79,6 +91,10 @@ func (c *Conversation) Parse() error {
 		return errors.New("no HTTP request parsed")
 	}
 
+	if c.ResponseBuffer.Len() == 0 {
+		return errors.New("empty response")
+	}
+
 	c.HTTPResponse, err = http.ReadResponse(bufio.NewReader(c.ResponseBuffer), c.HTTPRequest)
 	if err != nil {
 		return err
@@ -87,16 +103,24 @@ func (c *Conversation) Parse() error {
 	return nil
 }
 
-func Capture(packetSource *gopacket.PacketSource) {
+// Capture starts packet capturing and collects the payloads and stores them in
+// different Conversation values.
+func Capture(config *CaptureConfig, packetSource *gopacket.PacketSource) {
+	var r *regexp.Regexp
+	var err error
+
+	if config.Pattern != "" {
+		r, err = regexp.Compile(config.Pattern)
+		if err != nil {
+			panic(err)
+		}
+	}
+
+    fmt.Printf("%#v\n", r)
+
+	count := 0
+
 	for packet := range packetSource.Packets() {
-
-		//if layer := packet.Layer(layers.LayerTypeIPv4); layer != nil {
-		//	ipLayer := layer.(*layers.IPv4)
-
-		//} else {
-		//	continue
-		//}
-
 		layer := packet.Layer(layers.LayerTypeTCP)
 		if layer == nil {
 			continue
@@ -105,6 +129,7 @@ func Capture(packetSource *gopacket.PacketSource) {
 		tcpLayer := layer.(*layers.TCP)
 
 		flowKey := FlowKey(uint16(tcpLayer.SrcPort), uint16(tcpLayer.DstPort))
+		reverseFlowKey := Reverse(flowKey)
 
 		var conversation *Conversation
 		var ok bool
@@ -115,13 +140,13 @@ func Capture(packetSource *gopacket.PacketSource) {
 			conversation = &Conversation{
 				StartTime:      time.Now(),
 				RequestID:      flowKey,
-				ResponseID:     Reverse(flowKey),
+				ResponseID:     reverseFlowKey,
 				RequestBuffer:  new(bytes.Buffer),
 				ResponseBuffer: new(bytes.Buffer),
 			}
 
 			conversations[flowKey] = conversation
-			conversations[Reverse(flowKey)] = conversation
+			conversations[reverseFlowKey] = conversation
 		}
 
 		if tcpLayer.FIN {
@@ -129,14 +154,22 @@ func Capture(packetSource *gopacket.PacketSource) {
 
 			if conversation.RequestFIN && conversation.ResponseFIN {
 				if err := conversation.Parse(); err == nil {
-					fmt.Println(conversation.HTTPRequest)
-					fmt.Println(conversation.HTTPResponse)
+					if r != nil && r.Match([]byte(conversation.HTTPRequest.URL.Path)) {
+						fmt.Println(conversation.HTTPRequest)
+						fmt.Println(conversation.HTTPResponse)
+					}
 
-					// TODO delete conversations from the map
+					delete(conversations, flowKey)
+					delete(conversations, reverseFlowKey)
 				} else {
-					fmt.Println(err)
+					//fmt.Fprintf(os.Stderr, "Error %d Request:\n%s\nResponse:\n%s\n",
+					//    count,
+					//    conversation.RequestBuffer.String(),
+					//    conversation.ResponseBuffer.String())
 				}
 			}
 		}
+
+		count++
 	}
 }
