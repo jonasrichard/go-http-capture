@@ -3,9 +3,12 @@ package capture
 import (
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"os"
 	"regexp"
 	"time"
 
@@ -103,6 +106,37 @@ func (c *Conversation) Parse() error {
 	return nil
 }
 
+func (c *Conversation) Write() error {
+    if c.HTTPRequest == nil || c.HTTPResponse == nil {
+        return errors.New("missing request or response")
+    }
+
+    fmt.Printf("Request (%v)\n", c.StartTime)
+
+    c.HTTPRequest.Write(os.Stdout)
+
+    // If response body is gzipped we should deflate that
+    if c.HTTPResponse.Header.Get("Content-Encoding") == "gzip" {
+        reader, err := gzip.NewReader(c.HTTPResponse.Body)
+        if err != nil {
+            return err
+        }
+
+        body, err := io.ReadAll(reader)
+        if err != nil {
+            return err
+        }
+
+        c.HTTPResponse.Body = io.NopCloser(bytes.NewReader(body))
+
+        c.HTTPResponse.Write(os.Stdout)
+    } else {
+        c.HTTPResponse.Write(os.Stdout)
+    }
+
+    return nil
+}
+
 // Capture starts packet capturing and collects the payloads and stores them in
 // different Conversation values.
 func Capture(config *CaptureConfig, packetSource *gopacket.PacketSource) {
@@ -155,9 +189,7 @@ func Capture(config *CaptureConfig, packetSource *gopacket.PacketSource) {
 			if conversation.RequestFIN && conversation.ResponseFIN {
 				if err := conversation.Parse(); err == nil {
 					if r != nil && r.Match([]byte(conversation.HTTPRequest.URL.Path)) {
-                        fmt.Println("---")
-						fmt.Println(conversation.RequestBuffer.String())
-						fmt.Println(conversation.ResponseBuffer.String())
+                        conversation.Write()
 					}
 
 					delete(conversations, flowKey)
