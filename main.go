@@ -15,7 +15,7 @@ func main() {
 
 	flag.StringVar(&config.Interface, "i", "", "The interface from the data are captured")
 	flag.StringVar(&config.CaptureFile, "f", "", "Read from capture file (tcpdump)")
-	flag.StringVar(&config.Pattern, "p", "", "Read from capture file (tcpdump)")
+	flag.StringVar(&config.Pattern, "p", "", "Capture paths matching to this regexp")
 	flag.Parse()
 
 	fmt.Printf("%#v\n", config)
